@@ -1,9 +1,30 @@
 // === State ===
 let bankFile = null;
 let bankColumns = [];
+let bankData = [];       // parsed rows from bank file
 let lmsFileList = [];
+let lmsData = [];        // parsed rows from all LMS files
 let reconResult = null;
 const REQUIRED_FIELDS = ["TxnID", "Amount", "Date", "Description"];
+
+// === File Parsing (client-side via SheetJS) ===
+function parseFile(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const wb = XLSX.read(e.target.result, { type: 'array', cellDates: true });
+                const sheet = wb.Sheets[wb.SheetNames[0]];
+                const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+                resolve(rows);
+            } catch (err) {
+                reject(err);
+            }
+        };
+        reader.onerror = () => reject(new Error('Failed to read file'));
+        reader.readAsArrayBuffer(file);
+    });
+}
 
 // === Page Navigation ===
 function showPage(page) {
@@ -21,22 +42,16 @@ async function handleBankUpload(input) {
     bankFile = file;
     document.getElementById('bankLabel').textContent = file.name;
 
-    const form = new FormData();
-    form.append('bank_file', file);
-
     try {
-        const res = await fetch('/api/preview', { method: 'POST', body: form });
-        const text = await res.text();
-        let data;
-        try { data = JSON.parse(text); } catch { throw new Error(res.ok ? text.slice(0, 200) : `Server error ${res.status}: ${text.slice(0, 200)}`); }
-        if (data.error) throw new Error(data.error);
+        const rows = await parseFile(file);
+        bankData = rows;
+        bankColumns = rows.length > 0 ? Object.keys(rows[0]) : [];
 
-        bankColumns = data.columns;
-        document.getElementById('bankInfo').textContent = `Loaded ${data.row_count.toLocaleString()} rows, ${data.col_count} columns`;
-        document.getElementById('bankPreviewTable').innerHTML = buildTable(data.preview);
+        document.getElementById('bankInfo').textContent = `Loaded ${rows.length.toLocaleString()} rows, ${bankColumns.length} columns`;
+        document.getElementById('bankPreviewTable').innerHTML = buildTable(rows.slice(0, 5));
         document.getElementById('bankPreview').classList.remove('hidden');
 
-        renderMapping(data.columns);
+        renderMapping(bankColumns);
         updateRunButton();
     } catch (e) {
         document.getElementById('bankInfo').textContent = `Error: ${e.message}`;
@@ -46,17 +61,32 @@ async function handleBankUpload(input) {
 }
 
 // === LMS Files Upload ===
-function handleLmsUpload(input) {
+async function handleLmsUpload(input) {
     lmsFileList = Array.from(input.files);
     const info = document.getElementById('lmsInfo');
     if (lmsFileList.length === 0) {
         info.innerHTML = '';
+        lmsData = [];
         return;
     }
-    info.innerHTML = `<p class="text-sm text-green-600 font-medium">${lmsFileList.length} file(s) selected</p>` +
-        lmsFileList.map(f => `<p class="text-xs text-gray-500 ml-2">${f.name} (${(f.size / 1024).toFixed(1)} KB)</p>`).join('');
-    document.getElementById('lmsLabel').textContent = `${lmsFileList.length} file(s) selected`;
-    updateRunButton();
+    info.innerHTML = `<p class="text-sm text-blue-600 font-medium">Parsing ${lmsFileList.length} file(s)...</p>`;
+
+    try {
+        lmsData = [];
+        for (const f of lmsFileList) {
+            const rows = await parseFile(f);
+            // Tag each row with its source file name
+            rows.forEach(r => r._sourceFile = f.name);
+            lmsData = lmsData.concat(rows);
+        }
+        info.innerHTML = `<p class="text-sm text-green-600 font-medium">${lmsFileList.length} file(s) — ${lmsData.length.toLocaleString()} total rows</p>` +
+            lmsFileList.map(f => `<p class="text-xs text-gray-500 ml-2">${f.name} (${(f.size / 1024).toFixed(1)} KB)</p>`).join('');
+        document.getElementById('lmsLabel').textContent = `${lmsFileList.length} file(s) selected`;
+        updateRunButton();
+    } catch (e) {
+        info.innerHTML = `<p class="text-sm text-red-600 font-medium">Error parsing LMS files: ${e.message}</p>`;
+        lmsData = [];
+    }
 }
 
 // === Column Mapping ===
@@ -132,12 +162,12 @@ function validateMapping() {
 function updateRunButton() {
     const map = getColumnMap();
     const values = Object.values(map);
-    const valid = bankFile && lmsFileList.length > 0 && values.length === REQUIRED_FIELDS.length && new Set(values).size === values.length;
+    const valid = bankData.length > 0 && lmsData.length > 0 && values.length === REQUIRED_FIELDS.length && new Set(values).size === values.length;
     document.getElementById('runBtn').disabled = !valid;
     const status = document.getElementById('uploadStatus');
     const missing = [];
-    if (!bankFile) missing.push('bank statement');
-    if (lmsFileList.length === 0) missing.push('LMS file(s)');
+    if (bankData.length === 0) missing.push('bank statement');
+    if (lmsData.length === 0) missing.push('LMS file(s)');
     status.textContent = missing.length ? `Please upload: ${missing.join(', ')}` : '';
 }
 
@@ -148,13 +178,18 @@ async function runReconciliation() {
     btn.disabled = true;
     btn.innerHTML = '<span class="loader"></span> Running...';
 
-    const form = new FormData();
-    form.append('bank_file', bankFile);
-    lmsFileList.forEach(f => form.append('lms_files', f));
-    form.append('column_map', JSON.stringify(getColumnMap()));
+    const payload = JSON.stringify({
+        bank_data: bankData,
+        lms_data: lmsData,
+        column_map: getColumnMap(),
+    });
 
     try {
-        const res = await fetch('/api/reconcile', { method: 'POST', body: form });
+        const res = await fetch('/api/reconcile', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: payload,
+        });
         const text = await res.text();
         let data;
         try { data = JSON.parse(text); } catch { throw new Error(res.ok ? text.slice(0, 300) : `Server error ${res.status}: ${text.slice(0, 300)}`); }
@@ -242,14 +277,26 @@ function switchTab(key, btn) {
 
 // === Download Report ===
 async function downloadReport() {
-    const form = new FormData();
-    form.append('bank_file', bankFile);
-    lmsFileList.forEach(f => form.append('lms_files', f));
-    form.append('column_map', JSON.stringify(getColumnMap()));
+    const btn = event.target;
+    btn.disabled = true;
+    btn.textContent = 'Generating...';
+
+    const payload = JSON.stringify({
+        bank_data: bankData,
+        lms_data: lmsData,
+        column_map: getColumnMap(),
+    });
 
     try {
-        const res = await fetch('/api/report', { method: 'POST', body: form });
-        if (!res.ok) throw new Error('Download failed');
+        const res = await fetch('/api/report', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: payload,
+        });
+        if (!res.ok) {
+            const text = await res.text();
+            throw new Error(text.slice(0, 300));
+        }
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -259,6 +306,9 @@ async function downloadReport() {
         URL.revokeObjectURL(url);
     } catch (e) {
         alert(`Download failed: ${e.message}`);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Download Full Excel Report';
     }
 }
 
