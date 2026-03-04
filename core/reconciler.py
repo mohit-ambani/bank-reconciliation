@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 from utils.constants import (
     BANK_COL_TXN_ID, BANK_COL_AMOUNT, BANK_COL_BRAND,
+    BANK_COL_STATUS, LMS_COL_TRANS_STATUS,
+    LABEL_NOT_IN_LMS, LABEL_NOT_IN_BANK,
     CAT_MATCHED, CAT_AMOUNT_MISMATCH, CAT_BANK_ONLY, CAT_LMS_ONLY, CAT_DUPLICATE,
     LMS_COL_SOURCE_FILE,
 )
@@ -19,6 +21,7 @@ class ReconciliationResult:
     lms_duplicates: pd.DataFrame = field(default_factory=pd.DataFrame)
     summary: dict = field(default_factory=dict)
     brand_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
+    status_cross_match: pd.DataFrame = field(default_factory=pd.DataFrame)
     total_bank: int = 0
     total_lms: int = 0
 
@@ -108,6 +111,9 @@ def reconcile(bank_df: pd.DataFrame, lms_df: pd.DataFrame) -> ReconciliationResu
     # Step 5: Brand summary
     result.brand_summary = build_brand_summary(result)
 
+    # Step 6: Status cross-match
+    result.status_cross_match = build_status_cross_match(result)
+
     return result
 
 
@@ -149,3 +155,58 @@ def build_brand_summary(result: ReconciliationResult) -> pd.DataFrame:
     pivot.columns = [f"{val} ({cat})" for val, cat in pivot.columns]
     pivot = pivot.reset_index().sort_values("Brand")
     return pivot
+
+
+def build_status_cross_match(result: ReconciliationResult) -> pd.DataFrame:
+    """Group transactions by Bank Status, LMS TransStatus, and Brand (first char of TxnID)."""
+    frames = []
+
+    def _prepare(df, bank_status_default=None, lms_status_default=None, amount_col="Amount_Bank"):
+        if df.empty:
+            return
+        chunk = pd.DataFrame()
+        chunk[BANK_COL_TXN_ID] = df[BANK_COL_TXN_ID]
+        # Bank status
+        if BANK_COL_STATUS + "_Bank" in df.columns:
+            chunk["Bank Status"] = df[BANK_COL_STATUS + "_Bank"].fillna(bank_status_default or "")
+        elif BANK_COL_STATUS in df.columns:
+            chunk["Bank Status"] = df[BANK_COL_STATUS].fillna(bank_status_default or "")
+        else:
+            chunk["Bank Status"] = bank_status_default or ""
+        # LMS TransStatus
+        if LMS_COL_TRANS_STATUS + "_LMS" in df.columns:
+            chunk["LMS TransStatus"] = df[LMS_COL_TRANS_STATUS + "_LMS"].fillna(lms_status_default or "")
+        elif LMS_COL_TRANS_STATUS in df.columns:
+            chunk["LMS TransStatus"] = df[LMS_COL_TRANS_STATUS].fillna(lms_status_default or "")
+        else:
+            chunk["LMS TransStatus"] = lms_status_default or ""
+        # Brand = first character of TxnID
+        chunk["Brand"] = df[BANK_COL_TXN_ID].astype(str).str[:1].str.upper()
+        # Amount: prefer Amount_Bank, fallback to Amount_LMS, then Amount
+        if amount_col in df.columns:
+            chunk["Amount"] = pd.to_numeric(df[amount_col], errors="coerce").fillna(0)
+        elif "Amount_LMS" in df.columns:
+            chunk["Amount"] = pd.to_numeric(df["Amount_LMS"], errors="coerce").fillna(0)
+        elif BANK_COL_AMOUNT in df.columns:
+            chunk["Amount"] = pd.to_numeric(df[BANK_COL_AMOUNT], errors="coerce").fillna(0)
+        else:
+            chunk["Amount"] = 0
+        frames.append(chunk)
+
+    _prepare(result.matched)
+    _prepare(result.amount_mismatch)
+    _prepare(result.bank_only, lms_status_default=LABEL_NOT_IN_LMS)
+    _prepare(result.lms_only, bank_status_default=LABEL_NOT_IN_BANK, amount_col="Amount_LMS")
+
+    if not frames:
+        return pd.DataFrame(columns=["Bank Status", "LMS TransStatus", "Brand", "Count", "Total Amount"])
+
+    combined = pd.concat(frames, ignore_index=True)
+    grouped = (
+        combined
+        .groupby(["Bank Status", "LMS TransStatus", "Brand"], dropna=False)
+        .agg(Count=("Amount", "size"), **{"Total Amount": ("Amount", "sum")})
+        .reset_index()
+        .sort_values(["Bank Status", "LMS TransStatus", "Brand"])
+    )
+    return grouped

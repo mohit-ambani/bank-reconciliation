@@ -58,11 +58,39 @@ function handleLmsUpload(input) {
 }
 
 // === Column Mapping ===
+// Smart aliases for auto-detecting bank file columns (Razorpay payouts format)
+const COLUMN_ALIASES = {
+    "TxnID": ["payouts.reference_id", "reference_id", "transid", "trans_id", "txnid", "utr", "transaction_id"],
+    "Amount": ["amount", "debit", "credit", "total"],
+    "Date": ["created_at", "processed_at", "date", "txn_date", "transaction_date", "createdon"],
+    "Description": ["status_description", "description", "narration", "remarks", "purpose"],
+};
+
+function findBestColumn(columns, field) {
+    // Exact case-insensitive match first
+    let idx = columns.findIndex(c => c.toLowerCase() === field.toLowerCase());
+    if (idx >= 0) return idx;
+    // Check aliases
+    const aliases = COLUMN_ALIASES[field] || [];
+    for (const alias of aliases) {
+        idx = columns.findIndex(c => c.toLowerCase() === alias.toLowerCase());
+        if (idx >= 0) return idx;
+    }
+    // Partial match fallback
+    idx = columns.findIndex(c => c.toLowerCase().includes(field.toLowerCase()));
+    if (idx >= 0) return idx;
+    for (const alias of aliases) {
+        idx = columns.findIndex(c => c.toLowerCase().includes(alias.toLowerCase()));
+        if (idx >= 0) return idx;
+    }
+    return -1;
+}
+
 function renderMapping(columns) {
     const container = document.getElementById('mappingFields');
     container.innerHTML = '';
     REQUIRED_FIELDS.forEach(field => {
-        const defaultIdx = columns.findIndex(c => c.toLowerCase().includes(field.toLowerCase()));
+        const defaultIdx = findBestColumn(columns, field);
         const div = document.createElement('div');
         div.innerHTML = `
             <label class="block text-sm font-medium text-gray-700 mb-1">${field}</label>
@@ -167,6 +195,10 @@ function renderResults(data) {
     // Brand summary
     document.getElementById('brandSummaryTable').innerHTML = data.brand_summary.length
         ? buildTable(data.brand_summary) : '<p class="text-gray-500">No brand data</p>';
+
+    // Status cross-match
+    document.getElementById('statusCrossMatchTable').innerHTML = data.status_cross_match && data.status_cross_match.length
+        ? buildTable(data.status_cross_match) : '<p class="text-gray-500">No status cross-match data</p>';
 
     // LMS dupe warning
     const warn = document.getElementById('lmsDupeWarning');

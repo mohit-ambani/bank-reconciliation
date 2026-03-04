@@ -4,6 +4,10 @@ BANK_COL_AMOUNT = "Amount"
 BANK_COL_DATE = "Date"
 BANK_COL_DESCRIPTION = "Description"
 BANK_COL_BRAND = "Brand"
+BANK_COL_STATUS = "status"
+LMS_COL_TRANS_STATUS = "TransStatus"
+LABEL_NOT_IN_LMS = "Not in LMS"
+LABEL_NOT_IN_BANK = "Not in Bank"
 
 # The columns the user must map from their bank statement
 BANK_REQUIRED_FIELDS = [BANK_COL_TXN_ID, BANK_COL_AMOUNT, BANK_COL_DATE, BANK_COL_DESCRIPTION]
@@ -32,3 +36,4 @@ SHEET_AMOUNT_MISMATCH = "Amount Mismatch"
 SHEET_BANK_ONLY = "Bank Only"
 SHEET_LMS_ONLY = "LMS Only"
 SHEET_DUPLICATES = "Bank Duplicates"
+SHEET_STATUS_CROSS_MATCH = "Status Cross-Match"

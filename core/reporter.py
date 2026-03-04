@@ -4,6 +4,7 @@ from core.reconciler import ReconciliationResult
 from utils.constants import (
     SHEET_SUMMARY, SHEET_BRAND_SUMMARY, SHEET_MATCHED,
     SHEET_AMOUNT_MISMATCH, SHEET_BANK_ONLY, SHEET_LMS_ONLY, SHEET_DUPLICATES,
+    SHEET_STATUS_CROSS_MATCH,
 )
 
 
@@ -56,7 +57,16 @@ def generate_excel_report(result: ReconciliationResult) -> BytesIO:
                 writer, sheet_name=SHEET_BRAND_SUMMARY, index=False
             )
 
-        # Sheet 3-7: Detail sheets
+        # Sheet 3: Status Cross-Match
+        if not result.status_cross_match.empty:
+            result.status_cross_match.to_excel(writer, sheet_name=SHEET_STATUS_CROSS_MATCH, index=False)
+            _set_column_widths(writer.sheets[SHEET_STATUS_CROSS_MATCH], result.status_cross_match)
+        else:
+            pd.DataFrame({"Info": ["No status cross-match data"]}).to_excel(
+                writer, sheet_name=SHEET_STATUS_CROSS_MATCH, index=False
+            )
+
+        # Sheet 4-8: Detail sheets
         detail_sheets = [
             (SHEET_MATCHED, result.matched),
             (SHEET_AMOUNT_MISMATCH, result.amount_mismatch),

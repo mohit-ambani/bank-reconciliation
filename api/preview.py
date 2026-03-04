@@ -23,6 +23,10 @@ class _UploadedFile:
         return self._buf.read(*a)
     def seek(self, *a):
         return self._buf.seek(*a)
+    def tell(self):
+        return self._buf.tell()
+    def seekable(self):
+        return True
 
 
 class handler(BaseHTTPRequestHandler):

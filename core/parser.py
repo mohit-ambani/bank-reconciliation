@@ -48,9 +48,31 @@ def parse_lms_files(files: list) -> pd.DataFrame:
     Raises:
         ValueError: If any file is missing required columns.
     """
+    # Known aliases for LMS columns (lowercase alias -> canonical name)
+    LMS_ALIASES = {
+        "transid": "TxnID",
+        "trans_id": "TxnID",
+        "transaction_id": "TxnID",
+        "txnid": "TxnID",
+        "createdon": "Date",
+        "created_on": "Date",
+        "created_at": "Date",
+        "date": "Date",
+        "amount": "Amount",
+    }
+
     frames = []
     for f in files:
         df = read_file_to_df(f)
+
+        # First pass: rename known aliases to canonical names
+        alias_rename = {}
+        for col in df.columns:
+            canon = LMS_ALIASES.get(col.strip().lower())
+            if canon and col != canon:
+                alias_rename[col] = canon
+        if alias_rename:
+            df = df.rename(columns=alias_rename)
 
         # Case-insensitive column matching
         col_lower_map = {c.strip().lower(): c for c in df.columns}

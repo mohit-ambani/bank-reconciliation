@@ -32,6 +32,10 @@ class _UploadedFile:
         return self._buf.read(*a)
     def seek(self, *a):
         return self._buf.seek(*a)
+    def tell(self):
+        return self._buf.tell()
+    def seekable(self):
+        return True
 
 
 def _df_to_records(df: pd.DataFrame) -> list:
@@ -111,6 +115,7 @@ class handler(BaseHTTPRequestHandler):
                 "bank_only": _df_to_records(result.bank_only),
                 "lms_only": _df_to_records(result.lms_only),
                 "bank_duplicates": _df_to_records(result.bank_duplicates),
+                "status_cross_match": _df_to_records(result.status_cross_match),
                 "lms_duplicate_count": len(result.lms_duplicates),
                 "run_id": run_id,
             }
