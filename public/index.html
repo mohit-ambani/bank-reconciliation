@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bank Reconciliation Tool</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .tab-btn.active { border-color: #3b82f6; color: #3b82f6; background: #eff6ff; }
+        .page-btn.active { background: #3b82f6; color: white; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #e5e7eb; padding: 8px 12px; text-align: left; font-size: 13px; }
+        th { background: #f9fafb; font-weight: 600; position: sticky; top: 0; }
+        .table-wrap { max-height: 500px; overflow: auto; border: 1px solid #e5e7eb; border-radius: 8px; }
+        .loader { border: 3px solid #f3f3f3; border-top: 3px solid #3b82f6; border-radius: 50%; width: 24px; height: 24px; animation: spin 0.8s linear infinite; display: inline-block; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <header class="bg-white border-b shadow-sm">
+        <div class="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+            <h1 class="text-xl font-bold text-gray-800">Bank Reconciliation Tool</h1>
+            <nav class="flex gap-2">
+                <button onclick="showPage('upload')" id="nav-upload" class="page-btn active px-4 py-2 rounded-lg text-sm font-medium transition">Upload</button>
+                <button onclick="showPage('results')" id="nav-results" class="page-btn px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition" disabled>Results</button>
+                <button onclick="showPage('history')" id="nav-history" class="page-btn px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100 transition">History</button>
+            </nav>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 py-6">
+        <!-- UPLOAD PAGE -->
+        <div id="page-upload">
+            <div class="grid md:grid-cols-2 gap-6">
+                <!-- Bank Statement -->
+                <div class="bg-white rounded-xl shadow-sm border p-6">
+                    <h2 class="text-lg font-semibold mb-4">1. Bank Statement</h2>
+                    <label class="block border-2 border-dashed border-gray-300 rounded-lg p-8 text-center cursor-pointer hover:border-blue-400 transition">
+                        <input type="file" id="bankFile" accept=".csv,.xlsx,.xls" class="hidden" onchange="handleBankUpload(this)">
+                        <p class="text-gray-500" id="bankLabel">Click to upload CSV or Excel file</p>
+                    </label>
+                    <div id="bankPreview" class="mt-4 hidden">
+                        <p id="bankInfo" class="text-sm text-green-600 font-medium mb-3"></p>
+                        <div class="table-wrap" id="bankPreviewTable"></div>
+                    </div>
+                </div>
+
+                <!-- LMS Files -->
+                <div class="bg-white rounded-xl shadow-sm border p-6">
+                    <h2 class="text-lg font-semibold mb-4">2. LMS System Files</h2>
+                    <label class="block border-2 border-dashed border-gray-300 rounded-lg p-8 text-center cursor-pointer hover:border-blue-400 transition">
+                        <input type="file" id="lmsFiles" accept=".csv,.xlsx,.xls" multiple class="hidden" onchange="handleLmsUpload(this)">
+                        <p class="text-gray-500" id="lmsLabel">Click to upload one or more CSV/Excel files</p>
+                    </label>
+                    <div id="lmsInfo" class="mt-4"></div>
+                </div>
+            </div>
+
+            <!-- Column Mapping -->
+            <div id="mappingSection" class="bg-white rounded-xl shadow-sm border p-6 mt-6 hidden">
+                <h2 class="text-lg font-semibold mb-4">Map Bank Statement Columns</h2>
+                <p class="text-sm text-gray-500 mb-4">Select which column in your file corresponds to each required field.</p>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-4" id="mappingFields"></div>
+                <p id="mappingError" class="text-red-500 text-sm mt-2 hidden"></p>
+            </div>
+
+            <!-- Run Button -->
+            <div class="mt-6">
+                <button id="runBtn" onclick="runReconciliation()" disabled
+                    class="w-full py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition text-lg">
+                    Run Reconciliation
+                </button>
+                <p id="uploadStatus" class="text-sm text-gray-500 mt-2 text-center"></p>
+            </div>
+        </div>
+
+        <!-- RESULTS PAGE -->
+        <div id="page-results" class="hidden">
+            <!-- Metrics -->
+            <div class="grid grid-cols-2 md:grid-cols-6 gap-4 mb-6" id="metricsRow"></div>
+
+            <!-- Amount Metrics -->
+            <h3 class="text-lg font-semibold mb-3">Amount Summary</h3>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6" id="amountMetrics"></div>
+
+            <!-- Download -->
+            <button onclick="downloadReport()" class="w-full py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 transition mb-6">
+                Download Full Excel Report
+            </button>
+
+            <!-- Brand Summary -->
+            <div class="bg-white rounded-xl shadow-sm border p-6 mb-6">
+                <h3 class="text-lg font-semibold mb-3">Brand Summary</h3>
+                <div class="table-wrap" id="brandSummaryTable"></div>
+            </div>
+
+            <!-- LMS Dupe Warning -->
+            <div id="lmsDupeWarning" class="hidden bg-yellow-50 border border-yellow-200 text-yellow-800 rounded-xl p-4 mb-6"></div>
+
+            <!-- Detail Tabs -->
+            <div class="bg-white rounded-xl shadow-sm border p-6">
+                <div class="flex gap-2 mb-4 border-b" id="detailTabs"></div>
+                <div id="detailContent"></div>
+            </div>
+
+            <button onclick="showPage('upload')" class="w-full py-3 mt-6 border-2 border-gray-300 text-gray-700 font-semibold rounded-xl hover:bg-gray-100 transition">
+                Back to Upload
+            </button>
+        </div>
+
+        <!-- HISTORY PAGE -->
+        <div id="page-history" class="hidden">
+            <div class="bg-white rounded-xl shadow-sm border p-6">
+                <h2 class="text-lg font-semibold mb-4">Reconciliation History</h2>
+                <div id="historyContent"><p class="text-gray-500">Loading...</p></div>
+            </div>
+        </div>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>
