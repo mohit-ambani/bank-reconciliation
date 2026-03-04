@@ -26,7 +26,9 @@ async function handleBankUpload(input) {
 
     try {
         const res = await fetch('/api/preview', { method: 'POST', body: form });
-        const data = await res.json();
+        const text = await res.text();
+        let data;
+        try { data = JSON.parse(text); } catch { throw new Error(res.ok ? text.slice(0, 200) : `Server error ${res.status}: ${text.slice(0, 200)}`); }
         if (data.error) throw new Error(data.error);
 
         bankColumns = data.columns;
@@ -153,8 +155,10 @@ async function runReconciliation() {
 
     try {
         const res = await fetch('/api/reconcile', { method: 'POST', body: form });
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
+        const text = await res.text();
+        let data;
+        try { data = JSON.parse(text); } catch { throw new Error(res.ok ? text.slice(0, 300) : `Server error ${res.status}: ${text.slice(0, 300)}`); }
+        if (data.error) throw new Error(data.trace || data.error);
 
         reconResult = data;
         renderResults(data);
