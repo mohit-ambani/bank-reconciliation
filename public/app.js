@@ -38,13 +38,23 @@ async function gzipData(jsonString) {
 }
 
 // === Trim Data for Sending ===
+function compactDate(val) {
+    if (val == null || val === '') return val;
+    if (val instanceof Date) return val.toISOString().slice(0, 10);
+    const s = String(val);
+    // Match ISO-like datetime strings and keep only YYYY-MM-DD
+    if (/^\d{4}-\d{2}-\d{2}[T ]/.test(s)) return s.slice(0, 10);
+    return val;
+}
+
 function trimBankData(rows, columnMap) {
     // Keep only mapped columns + status
     const keepCols = new Set([...Object.values(columnMap), ...BANK_EXTRA_COLS]);
+    const dateCol = columnMap['Date'];
     return rows.map(row => {
         const slim = {};
         for (const k of keepCols) {
-            if (k in row) slim[k] = row[k];
+            if (k in row) slim[k] = (k === dateCol) ? compactDate(row[k]) : row[k];
         }
         return slim;
     });
@@ -56,10 +66,11 @@ function trimLmsData(rows) {
     const allKeys = Object.keys(rows[0]);
     const lmsLower = new Set(LMS_KNOWN_COLS.map(c => c.toLowerCase()));
     const keepCols = allKeys.filter(k => lmsLower.has(k.toLowerCase()) || k === '_sourceFile');
+    const dateLower = new Set(['date', 'createdon', 'created_on', 'created_at']);
     return rows.map(row => {
         const slim = {};
         for (const k of keepCols) {
-            slim[k] = row[k];
+            slim[k] = dateLower.has(k.toLowerCase()) ? compactDate(row[k]) : row[k];
         }
         return slim;
     });
@@ -125,7 +136,9 @@ async function handleLmsUpload(input) {
 
     try {
         lmsData = [];
-        for (const f of lmsFileList) {
+        for (let i = 0; i < lmsFileList.length; i++) {
+            const f = lmsFileList[i];
+            info.innerHTML = `<p class="text-sm text-blue-600 font-medium">Parsing file ${i + 1} of ${lmsFileList.length}... (${f.name})</p>`;
             const rows = await parseFile(f);
             rows.forEach(r => r._sourceFile = f.name);
             lmsData = lmsData.concat(rows);
@@ -277,7 +290,7 @@ function renderResults(data) {
         ? buildTable(data.brand_summary) : '<p class="text-gray-500">No brand data</p>';
 
     document.getElementById('statusCrossMatchTable').innerHTML = data.status_cross_match && data.status_cross_match.length
-        ? buildTable(data.status_cross_match) : '<p class="text-gray-500">No status cross-match data</p>';
+        ? buildStatusCrossMatchTable(data.status_cross_match) : '<p class="text-gray-500">No status cross-match data</p>';
 
     const warn = document.getElementById('lmsDupeWarning');
     if (data.lms_duplicate_count > 0) {
@@ -287,32 +300,8 @@ function renderResults(data) {
         warn.classList.add('hidden');
     }
 
-    const tabs = [
-        { key: 'matched', label: 'Matched', count: data.matched_total || data.matched.length },
-        { key: 'amount_mismatch', label: 'Amount Mismatch', count: data.amount_mismatch_total || data.amount_mismatch.length },
-        { key: 'bank_only', label: 'Bank Only', count: data.bank_only_total || data.bank_only.length },
-        { key: 'lms_only', label: 'LMS Only', count: data.lms_only_total || data.lms_only.length },
-        { key: 'bank_duplicates', label: 'Duplicates', count: data.bank_duplicates_total || data.bank_duplicates.length },
-    ];
-
-    document.getElementById('detailTabs').innerHTML = tabs.map((t, i) =>
-        `<button class="tab-btn px-4 py-2 border-b-2 text-sm font-medium transition ${i === 0 ? 'active border-blue-500' : 'border-transparent text-gray-500 hover:text-gray-700'}" onclick="switchTab('${t.key}', this)">${t.label} (${t.count.toLocaleString()})</button>`
-    ).join('');
-
-    switchTab('matched', document.querySelector('.tab-btn'));
-}
-
-function switchTab(key, btn) {
-    document.querySelectorAll('.tab-btn').forEach(b => { b.classList.remove('active', 'border-blue-500'); b.classList.add('border-transparent', 'text-gray-500'); });
-    btn.classList.add('active', 'border-blue-500');
-    btn.classList.remove('border-transparent', 'text-gray-500');
-
-    const rows = reconResult[key];
-    const total = reconResult[key + '_total'] || rows.length;
-    const capped = total > rows.length ? `<p class="text-sm text-amber-600 mb-2">Showing ${rows.length.toLocaleString()} of ${total.toLocaleString()} rows (download Excel for full data)</p>` : `<p class="text-sm text-gray-500 mb-2">${rows.length.toLocaleString()} rows</p>`;
-    document.getElementById('detailContent').innerHTML = rows.length
-        ? `${capped}<div class="table-wrap">${buildTable(rows)}</div>`
-        : '<p class="text-gray-500 py-4">No records found.</p>';
+    // Flagged: Bank Processed + LMS Reject / Not in LMS — brand wise
+    renderFlaggedTxns(data.bank_success_lms_fail || []);
 }
 
 // === Download Report ===
@@ -364,6 +353,144 @@ async function loadHistory() {
     } catch (e) {
         el.innerHTML = `<p class="text-red-500">Failed to load history: ${e.message}</p>`;
     }
+}
+
+// === Flagged Transactions: Bank Processed + LMS Reject/Not in LMS ===
+function renderFlaggedTxns(records) {
+    const container = document.getElementById('flaggedTxnContent');
+    if (!records || records.length === 0) {
+        container.innerHTML = '<p class="text-green-600 font-medium">No discrepancies — all bank-success transactions are confirmed in LMS.</p>';
+        return;
+    }
+
+    // Group by brand
+    const byBrand = {};
+    for (const r of records) {
+        const b = r.Brand || '?';
+        if (!byBrand[b]) byBrand[b] = [];
+        byBrand[b].push(r);
+    }
+    const brands = Object.keys(byBrand).sort();
+
+    // Brand tabs
+    let html = `<p class="text-red-600 font-semibold mb-3">${records.length.toLocaleString()} transaction(s) found</p>`;
+    html += '<div class="flex gap-2 mb-4 flex-wrap">';
+    brands.forEach((brand, i) => {
+        const count = byBrand[brand].length;
+        html += `<button class="flagged-brand-btn px-4 py-2 rounded-lg text-sm font-medium border transition ${i === 0 ? 'bg-red-600 text-white border-red-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}" onclick="showFlaggedBrand('${brand}', this)">Brand ${brand} (${count.toLocaleString()})</button>`;
+    });
+    // "All" button
+    html += `<button class="flagged-brand-btn px-4 py-2 rounded-lg text-sm font-medium border transition bg-white text-gray-700 border-gray-300 hover:bg-gray-50" onclick="showFlaggedBrand('__ALL__', this)">All (${records.length.toLocaleString()})</button>`;
+    html += '</div>';
+
+    html += '<div id="flaggedBrandDetail"></div>';
+    container.innerHTML = html;
+
+    // Show first brand by default
+    showFlaggedBrand(brands[0], document.querySelector('.flagged-brand-btn'));
+}
+
+function showFlaggedBrand(brand, btn) {
+    // Update active button
+    document.querySelectorAll('.flagged-brand-btn').forEach(b => {
+        b.classList.remove('bg-red-600', 'text-white', 'border-red-600');
+        b.classList.add('bg-white', 'text-gray-700', 'border-gray-300');
+    });
+    btn.classList.remove('bg-white', 'text-gray-700', 'border-gray-300');
+    btn.classList.add('bg-red-600', 'text-white', 'border-red-600');
+
+    const all = reconResult.bank_success_lms_fail || [];
+    const rows = brand === '__ALL__' ? all : all.filter(r => r.Brand === brand);
+
+    const keys = ['TxnID', 'Amount', 'Bank Status', 'LMS TransStatus', 'Brand'];
+    const header = '<tr>' + keys.map(k => `<th>${k}</th>`).join('') + '</tr>';
+    const display = rows.slice(0, 500);
+    const body = display.map(row =>
+        '<tr>' + keys.map(k => `<td>${row[k] ?? ''}</td>`).join('') + '</tr>'
+    ).join('');
+    const note = rows.length > 500 ? `<p class="text-xs text-amber-600 mt-1">Showing 500 of ${rows.length.toLocaleString()} — download Excel for full list</p>` : '';
+
+    const totalAmt = rows.reduce((s, t) => s + (Number(t.Amount) || 0), 0);
+    const label = brand === '__ALL__' ? 'All Brands' : `Brand ${brand}`;
+    const fileName = brand === '__ALL__' ? '' : `'${brand}'`;
+
+    let html = `<div class="flex items-center justify-between mb-2">`;
+    html += `<p class="text-sm text-gray-600">${label}: <strong>${rows.length.toLocaleString()}</strong> txns, Amount: <strong>${fmtAmt(totalAmt)}</strong></p>`;
+    html += `<button onclick="downloadFlaggedTxns(${fileName})" class="px-3 py-1.5 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 transition">Download Excel</button>`;
+    html += '</div>';
+    html += `<div class="table-wrap"><table><thead>${header}</thead><tbody>${body}</tbody></table></div>${note}`;
+
+    document.getElementById('flaggedBrandDetail').innerHTML = html;
+}
+
+function downloadFlaggedTxns(brand) {
+    if (!reconResult || !reconResult.bank_success_lms_fail) return;
+    let rows = reconResult.bank_success_lms_fail;
+    let filename = 'Flagged_TxnIDs_ALL.xlsx';
+    if (brand) {
+        rows = rows.filter(r => r.Brand === brand);
+        filename = `Flagged_TxnIDs_Brand_${brand}.xlsx`;
+    }
+    if (rows.length === 0) { alert('No records to download.'); return; }
+    const wsData = rows.map(r => ({
+        'TxnID': r.TxnID,
+        'Amount': r.Amount,
+        'Bank Status': r['Bank Status'],
+        'LMS TransStatus': r['LMS TransStatus'],
+        'Brand': r.Brand,
+    }));
+    const ws = XLSX.utils.json_to_sheet(wsData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Flagged');
+    XLSX.writeFile(wb, filename);
+}
+
+// === Status Cross-Match Click-to-Download ===
+function buildStatusCrossMatchTable(rows) {
+    if (!rows || rows.length === 0) return '<p class="text-gray-500">No data</p>';
+    const keys = Object.keys(rows[0]);
+    const header = '<tr>' + keys.map(k => `<th>${k}</th>`).join('') + '</tr>';
+    const body = rows.map(row => {
+        const bankSt = row['Bank Status'] ?? '';
+        const lmsSt = row['LMS TransStatus'] ?? '';
+        const brand = row['Brand'] ?? '';
+        const dataKey = `${bankSt}|${lmsSt}|${brand}`;
+        return `<tr class="status-row" data-key="${dataKey}" onclick="downloadStatusTxnIds(this)" title="Click to download TxnIDs as Excel">`
+            + keys.map(k => `<td>${row[k] ?? ''}</td>`).join('') + '</tr>';
+    }).join('');
+    return `<p class="text-xs text-gray-400 mb-1">Click any row to download its TxnIDs as Excel</p>`
+        + `<table><thead>${header}</thead><tbody>${body}</tbody></table>`;
+}
+
+function downloadStatusTxnIds(rowEl) {
+    const key = rowEl.getAttribute('data-key');
+    if (!reconResult || !reconResult.status_txn_map) {
+        alert('TxnID detail not available for this reconciliation run.');
+        return;
+    }
+    const txns = reconResult.status_txn_map[key];
+    if (!txns || txns.length === 0) {
+        alert('No transactions found for this status combination.');
+        return;
+    }
+    // Build worksheet data with extra context columns
+    const parts = key.split('|');
+    const wsData = txns.map(t => ({
+        'TxnID': t.TxnID,
+        'Amount': t.Amount,
+        'Bank Status': parts[0] || '',
+        'LMS TransStatus': parts[1] || '',
+        'Brand': parts[2] || '',
+    }));
+    const ws = XLSX.utils.json_to_sheet(wsData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'TxnIDs');
+    const safeName = key.replace(/[|]/g, '_').replace(/[^a-zA-Z0-9_\-]/g, '');
+    XLSX.writeFile(wb, `TxnIDs_${safeName}.xlsx`);
+
+    // Brief visual feedback
+    rowEl.style.background = '#dcfce7';
+    setTimeout(() => { rowEl.style.background = ''; }, 800);
 }
 
 // === Helpers ===

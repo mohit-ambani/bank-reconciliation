@@ -90,9 +90,16 @@ class handler(BaseHTTPRequestHandler):
                 "bank_duplicates": _df_to_records(result.bank_duplicates.head(ROW_LIMIT)),
                 "bank_duplicates_total": len(result.bank_duplicates),
                 "status_cross_match": _df_to_records(result.status_cross_match),
+                "status_txn_map": result.status_txn_map,
+                "bank_success_lms_fail": result.bank_success_lms_fail,
                 "lms_duplicate_count": len(result.lms_duplicates),
                 "run_id": run_id,
             }
+
+            # Safety: drop status_txn_map if response exceeds 4MB
+            body_bytes = json.dumps(response, default=str).encode()
+            if len(body_bytes) > 4 * 1024 * 1024:
+                response["status_txn_map"] = {}
 
             self._json_response(200, response)
 

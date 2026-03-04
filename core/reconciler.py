@@ -22,6 +22,8 @@ class ReconciliationResult:
     summary: dict = field(default_factory=dict)
     brand_summary: pd.DataFrame = field(default_factory=pd.DataFrame)
     status_cross_match: pd.DataFrame = field(default_factory=pd.DataFrame)
+    status_txn_map: dict = field(default_factory=dict)
+    bank_success_lms_fail: list = field(default_factory=list)
     total_bank: int = 0
     total_lms: int = 0
 
@@ -108,57 +110,56 @@ def reconcile(bank_df: pd.DataFrame, lms_df: pd.DataFrame) -> ReconciliationResu
         "LMS Only Amount": result.lms_only["Amount_LMS"].sum() if not result.lms_only.empty else 0,
     }
 
-    # Step 5: Brand summary
-    result.brand_summary = build_brand_summary(result)
+    # Step 5: Brand summary (simple Bank vs LMS per brand)
+    result.brand_summary = build_brand_summary(bank_deduped, lms_deduped)
 
-    # Step 6: Status cross-match
-    result.status_cross_match = build_status_cross_match(result)
+    # Step 6: Status cross-match + txn map (share one combined DataFrame)
+    combined = _build_status_combined(result)
+    result.status_cross_match = _aggregate_status_cross_match(combined)
+    result.status_txn_map = _build_status_txn_map(combined)
+
+    # Step 7: Bank success but LMS failure/missing
+    result.bank_success_lms_fail = _find_bank_success_lms_fail(combined)
 
     return result
 
 
-def build_brand_summary(result: ReconciliationResult) -> pd.DataFrame:
-    """Group each category by brand (first 2 chars of TxnID) and aggregate."""
-    rows = []
+def build_brand_summary(bank_deduped: pd.DataFrame, lms_deduped: pd.DataFrame) -> pd.DataFrame:
+    """Simple brand summary: Brand, Bank Txns, LMS Txns, Bank Amount, LMS Amount."""
+    bank_agg = pd.DataFrame(columns=["Brand", "Bank Txns", "Bank Amount"])
+    lms_agg = pd.DataFrame(columns=["Brand", "LMS Txns", "LMS Amount"])
 
-    def _add_brand_rows(df, category, amount_col):
-        if df.empty:
-            return
-        brands = extract_brand(df[BANK_COL_TXN_ID])
-        for brand, group in df.groupby(brands):
-            rows.append({
-                "Brand": brand,
-                "Category": category,
-                "Count": len(group),
-                "Total Amount": group[amount_col].sum() if amount_col in group.columns else 0,
-            })
+    if not bank_deduped.empty:
+        tmp = bank_deduped.copy()
+        tmp["_brand"] = extract_brand(tmp[BANK_COL_TXN_ID])
+        tmp["_amt"] = pd.to_numeric(tmp[BANK_COL_AMOUNT], errors="coerce").fillna(0)
+        bank_agg = (
+            tmp.groupby("_brand")
+            .agg(**{"Bank Txns": ("_amt", "size"), "Bank Amount": ("_amt", "sum")})
+            .reset_index()
+            .rename(columns={"_brand": "Brand"})
+        )
 
-    _add_brand_rows(result.matched, CAT_MATCHED, "Amount_Bank")
-    _add_brand_rows(result.amount_mismatch, CAT_AMOUNT_MISMATCH, "Amount_Bank")
-    _add_brand_rows(result.bank_only, CAT_BANK_ONLY, "Amount_Bank")
-    _add_brand_rows(result.lms_only, CAT_LMS_ONLY, "Amount_LMS")
-    _add_brand_rows(result.bank_duplicates, CAT_DUPLICATE, BANK_COL_AMOUNT)
+    if not lms_deduped.empty:
+        tmp = lms_deduped.copy()
+        tmp["_brand"] = extract_brand(tmp[BANK_COL_TXN_ID])
+        tmp["_amt"] = pd.to_numeric(tmp[BANK_COL_AMOUNT], errors="coerce").fillna(0)
+        lms_agg = (
+            tmp.groupby("_brand")
+            .agg(**{"LMS Txns": ("_amt", "size"), "LMS Amount": ("_amt", "sum")})
+            .reset_index()
+            .rename(columns={"_brand": "Brand"})
+        )
 
-    if not rows:
-        return pd.DataFrame(columns=["Brand", "Category", "Count", "Total Amount"])
-
-    summary = pd.DataFrame(rows)
-    # Pivot for a cleaner view: brands as rows, categories as column groups
-    pivot = summary.pivot_table(
-        index="Brand",
-        columns="Category",
-        values=["Count", "Total Amount"],
-        aggfunc="sum",
-        fill_value=0,
-    )
-    # Flatten multi-level columns
-    pivot.columns = [f"{val} ({cat})" for val, cat in pivot.columns]
-    pivot = pivot.reset_index().sort_values("Brand")
-    return pivot
+    merged = pd.merge(bank_agg, lms_agg, on="Brand", how="outer").fillna(0)
+    for col in ["Bank Txns", "LMS Txns"]:
+        if col in merged.columns:
+            merged[col] = merged[col].astype(int)
+    return merged.sort_values("Brand").reset_index(drop=True)
 
 
-def build_status_cross_match(result: ReconciliationResult) -> pd.DataFrame:
-    """Group transactions by Bank Status, LMS TransStatus, and Brand (first char of TxnID)."""
+def _build_status_combined(result: ReconciliationResult) -> pd.DataFrame:
+    """Build a combined DataFrame with TxnID, Bank Status, LMS TransStatus, Brand, Amount."""
     frames = []
 
     def _prepare(df, bank_status_default=None, lms_status_default=None, amount_col="Amount_Bank"):
@@ -199,14 +200,79 @@ def build_status_cross_match(result: ReconciliationResult) -> pd.DataFrame:
     _prepare(result.lms_only, bank_status_default=LABEL_NOT_IN_BANK, amount_col="Amount_LMS")
 
     if not frames:
-        return pd.DataFrame(columns=["Bank Status", "LMS TransStatus", "Brand", "Count", "Total Amount"])
+        return pd.DataFrame(columns=[BANK_COL_TXN_ID, "Bank Status", "LMS TransStatus", "Brand", "Amount"])
 
-    combined = pd.concat(frames, ignore_index=True)
-    grouped = (
+    return pd.concat(frames, ignore_index=True)
+
+
+def _aggregate_status_cross_match(combined: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate combined status data into cross-match summary."""
+    if combined.empty:
+        return pd.DataFrame(columns=["Bank Status", "LMS TransStatus", "Brand", "Count", "Total Amount"])
+    return (
         combined
         .groupby(["Bank Status", "LMS TransStatus", "Brand"], dropna=False)
         .agg(Count=("Amount", "size"), **{"Total Amount": ("Amount", "sum")})
         .reset_index()
         .sort_values(["Bank Status", "LMS TransStatus", "Brand"])
     )
-    return grouped
+
+
+def _build_status_txn_map(combined: pd.DataFrame) -> dict:
+    """Build a dict keyed by 'bankStatus|lmsStatus|brand' → [{TxnID, Amount}, ...]."""
+    if combined.empty:
+        return {}
+    txn_map = {}
+    for (bank_st, lms_st, brand), group in combined.groupby(
+        ["Bank Status", "LMS TransStatus", "Brand"], dropna=False
+    ):
+        key = f"{bank_st}|{lms_st}|{brand}"
+        txn_map[key] = [
+            {BANK_COL_TXN_ID: row[BANK_COL_TXN_ID], "Amount": row["Amount"]}
+            for _, row in group.iterrows()
+        ]
+    return txn_map
+
+
+def build_status_cross_match(result: ReconciliationResult) -> pd.DataFrame:
+    """Group transactions by Bank Status, LMS TransStatus, and Brand (first char of TxnID)."""
+    combined = _build_status_combined(result)
+    return _aggregate_status_cross_match(combined)
+
+
+# Keywords (lowercased) that indicate success in bank / LMS
+_BANK_SUCCESS_KW = {"processed", "success", "completed", "settled"}
+_LMS_SUCCESS_KW = {"success", "completed", "approved", "settled", "processed"}
+
+
+def _find_bank_success_lms_fail(combined: pd.DataFrame) -> list:
+    """
+    Return list of {TxnID, Amount, Bank Status, LMS TransStatus, Brand}
+    where bank status indicates success but LMS status does NOT.
+    Includes 'Not in LMS' (bank-only) transactions.
+    """
+    if combined.empty:
+        return []
+
+    bank_lower = combined["Bank Status"].astype(str).str.strip().str.lower()
+    lms_lower = combined["LMS TransStatus"].astype(str).str.strip().str.lower()
+
+    bank_ok = bank_lower.isin(_BANK_SUCCESS_KW)
+    lms_ok = lms_lower.isin(_LMS_SUCCESS_KW)
+
+    mask = bank_ok & ~lms_ok
+    flagged = combined[mask]
+
+    if flagged.empty:
+        return []
+
+    return [
+        {
+            BANK_COL_TXN_ID: row[BANK_COL_TXN_ID],
+            "Amount": row["Amount"],
+            "Bank Status": row["Bank Status"],
+            "LMS TransStatus": row["LMS TransStatus"],
+            "Brand": row["Brand"],
+        }
+        for _, row in flagged.iterrows()
+    ]
