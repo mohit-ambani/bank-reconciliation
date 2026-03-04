@@ -288,11 +288,11 @@ function renderResults(data) {
     }
 
     const tabs = [
-        { key: 'matched', label: 'Matched', count: data.matched.length },
-        { key: 'amount_mismatch', label: 'Amount Mismatch', count: data.amount_mismatch.length },
-        { key: 'bank_only', label: 'Bank Only', count: data.bank_only.length },
-        { key: 'lms_only', label: 'LMS Only', count: data.lms_only.length },
-        { key: 'bank_duplicates', label: 'Duplicates', count: data.bank_duplicates.length },
+        { key: 'matched', label: 'Matched', count: data.matched_total || data.matched.length },
+        { key: 'amount_mismatch', label: 'Amount Mismatch', count: data.amount_mismatch_total || data.amount_mismatch.length },
+        { key: 'bank_only', label: 'Bank Only', count: data.bank_only_total || data.bank_only.length },
+        { key: 'lms_only', label: 'LMS Only', count: data.lms_only_total || data.lms_only.length },
+        { key: 'bank_duplicates', label: 'Duplicates', count: data.bank_duplicates_total || data.bank_duplicates.length },
     ];
 
     document.getElementById('detailTabs').innerHTML = tabs.map((t, i) =>
@@ -308,8 +308,10 @@ function switchTab(key, btn) {
     btn.classList.remove('border-transparent', 'text-gray-500');
 
     const rows = reconResult[key];
+    const total = reconResult[key + '_total'] || rows.length;
+    const capped = total > rows.length ? `<p class="text-sm text-amber-600 mb-2">Showing ${rows.length.toLocaleString()} of ${total.toLocaleString()} rows (download Excel for full data)</p>` : `<p class="text-sm text-gray-500 mb-2">${rows.length.toLocaleString()} rows</p>`;
     document.getElementById('detailContent').innerHTML = rows.length
-        ? `<p class="text-sm text-gray-500 mb-2">${rows.length.toLocaleString()} rows</p><div class="table-wrap">${buildTable(rows)}</div>`
+        ? `${capped}<div class="table-wrap">${buildTable(rows)}</div>`
         : '<p class="text-gray-500 py-4">No records found.</p>';
 }
 

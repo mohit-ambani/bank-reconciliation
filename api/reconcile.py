@@ -73,14 +73,22 @@ class handler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
 
+            # Cap detail rows to stay under Vercel 4.5MB response limit
+            ROW_LIMIT = 1000
+
             response = {
                 "summary": result.summary,
                 "brand_summary": _df_to_records(result.brand_summary),
-                "matched": _df_to_records(result.matched),
-                "amount_mismatch": _df_to_records(result.amount_mismatch),
-                "bank_only": _df_to_records(result.bank_only),
-                "lms_only": _df_to_records(result.lms_only),
-                "bank_duplicates": _df_to_records(result.bank_duplicates),
+                "matched": _df_to_records(result.matched.head(ROW_LIMIT)),
+                "matched_total": len(result.matched),
+                "amount_mismatch": _df_to_records(result.amount_mismatch.head(ROW_LIMIT)),
+                "amount_mismatch_total": len(result.amount_mismatch),
+                "bank_only": _df_to_records(result.bank_only.head(ROW_LIMIT)),
+                "bank_only_total": len(result.bank_only),
+                "lms_only": _df_to_records(result.lms_only.head(ROW_LIMIT)),
+                "lms_only_total": len(result.lms_only),
+                "bank_duplicates": _df_to_records(result.bank_duplicates.head(ROW_LIMIT)),
+                "bank_duplicates_total": len(result.bank_duplicates),
                 "status_cross_match": _df_to_records(result.status_cross_match),
                 "lms_duplicate_count": len(result.lms_duplicates),
                 "run_id": run_id,
