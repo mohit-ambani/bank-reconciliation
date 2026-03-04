@@ -1,6 +1,6 @@
 """
 POST /api/reconcile
-Accepts JSON body with:
+Accepts JSON body (optionally gzip-compressed) with:
   - bank_data: list of row dicts (parsed client-side)
   - lms_data: list of row dicts (parsed client-side)
   - column_map: dict mapping canonical names to original column names
@@ -9,6 +9,7 @@ Returns JSON with reconciliation results.
 import json
 import sys
 import os
+import gzip
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -30,16 +31,19 @@ def _df_to_records(df: pd.DataFrame) -> list:
     return out.fillna("").to_dict(orient="records")
 
 
+def _read_body(handler):
+    """Read request body, decompressing gzip if needed."""
+    length = int(handler.headers.get("Content-Length", 0))
+    raw = handler.rfile.read(length)
+    if handler.headers.get("Content-Encoding") == "gzip":
+        raw = gzip.decompress(raw)
+    return json.loads(raw)
+
+
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
-            content_type = self.headers.get("Content-Type", "")
-            if "application/json" not in content_type:
-                self._json_response(400, {"error": "Expected application/json"})
-                return
-
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
+            body = _read_body(self)
 
             bank_rows = body.get("bank_data")
             lms_rows = body.get("lms_data")

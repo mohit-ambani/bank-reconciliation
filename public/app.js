@@ -7,6 +7,11 @@ let lmsData = [];        // parsed rows from all LMS files
 let reconResult = null;
 const REQUIRED_FIELDS = ["TxnID", "Amount", "Date", "Description"];
 
+// Extra bank columns to always include (status for cross-match)
+const BANK_EXTRA_COLS = ["status"];
+// LMS columns we always need
+const LMS_KNOWN_COLS = ["TxnID", "TransID", "transid", "Amount", "amount", "Date", "CreatedOn", "createdon", "created_on", "created_at", "TransStatus", "transstatus"];
+
 // === File Parsing (client-side via SheetJS) ===
 function parseFile(file) {
     return new Promise((resolve, reject) => {
@@ -23,6 +28,53 @@ function parseFile(file) {
         };
         reader.onerror = () => reject(new Error('Failed to read file'));
         reader.readAsArrayBuffer(file);
+    });
+}
+
+// === Gzip Compression ===
+async function gzipData(jsonString) {
+    const stream = new Blob([jsonString]).stream().pipeThrough(new CompressionStream('gzip'));
+    return new Response(stream).arrayBuffer();
+}
+
+// === Trim Data for Sending ===
+function trimBankData(rows, columnMap) {
+    // Keep only mapped columns + status
+    const keepCols = new Set([...Object.values(columnMap), ...BANK_EXTRA_COLS]);
+    return rows.map(row => {
+        const slim = {};
+        for (const k of keepCols) {
+            if (k in row) slim[k] = row[k];
+        }
+        return slim;
+    });
+}
+
+function trimLmsData(rows) {
+    // Keep only columns that match known LMS column names (case-insensitive)
+    if (rows.length === 0) return rows;
+    const allKeys = Object.keys(rows[0]);
+    const lmsLower = new Set(LMS_KNOWN_COLS.map(c => c.toLowerCase()));
+    const keepCols = allKeys.filter(k => lmsLower.has(k.toLowerCase()) || k === '_sourceFile');
+    return rows.map(row => {
+        const slim = {};
+        for (const k of keepCols) {
+            slim[k] = row[k];
+        }
+        return slim;
+    });
+}
+
+async function sendCompressed(url, payload) {
+    const jsonStr = JSON.stringify(payload);
+    const compressed = await gzipData(jsonStr);
+    return fetch(url, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Content-Encoding': 'gzip',
+        },
+        body: compressed,
     });
 }
 
@@ -75,7 +127,6 @@ async function handleLmsUpload(input) {
         lmsData = [];
         for (const f of lmsFileList) {
             const rows = await parseFile(f);
-            // Tag each row with its source file name
             rows.forEach(r => r._sourceFile = f.name);
             lmsData = lmsData.concat(rows);
         }
@@ -90,7 +141,6 @@ async function handleLmsUpload(input) {
 }
 
 // === Column Mapping ===
-// Smart aliases for auto-detecting bank file columns (Razorpay payouts format)
 const COLUMN_ALIASES = {
     "TxnID": ["payouts.reference_id", "reference_id", "transid", "trans_id", "txnid", "utr", "transaction_id"],
     "Amount": ["amount", "debit", "credit", "total"],
@@ -99,16 +149,13 @@ const COLUMN_ALIASES = {
 };
 
 function findBestColumn(columns, field) {
-    // Exact case-insensitive match first
     let idx = columns.findIndex(c => c.toLowerCase() === field.toLowerCase());
     if (idx >= 0) return idx;
-    // Check aliases
     const aliases = COLUMN_ALIASES[field] || [];
     for (const alias of aliases) {
         idx = columns.findIndex(c => c.toLowerCase() === alias.toLowerCase());
         if (idx >= 0) return idx;
     }
-    // Partial match fallback
     idx = columns.findIndex(c => c.toLowerCase().includes(field.toLowerCase()));
     if (idx >= 0) return idx;
     for (const alias of aliases) {
@@ -178,18 +225,15 @@ async function runReconciliation() {
     btn.disabled = true;
     btn.innerHTML = '<span class="loader"></span> Running...';
 
-    const payload = JSON.stringify({
-        bank_data: bankData,
-        lms_data: lmsData,
-        column_map: getColumnMap(),
-    });
+    const columnMap = getColumnMap();
+    const payload = {
+        bank_data: trimBankData(bankData, columnMap),
+        lms_data: trimLmsData(lmsData),
+        column_map: columnMap,
+    };
 
     try {
-        const res = await fetch('/api/reconcile', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: payload,
-        });
+        const res = await sendCompressed('/api/reconcile', payload);
         const text = await res.text();
         let data;
         try { data = JSON.parse(text); } catch { throw new Error(res.ok ? text.slice(0, 300) : `Server error ${res.status}: ${text.slice(0, 300)}`); }
@@ -211,7 +255,6 @@ async function runReconciliation() {
 function renderResults(data) {
     const s = data.summary;
 
-    // Top metrics
     const metrics = [
         { label: 'Total Bank Txns', value: fmt(s['Total Bank Transactions']) },
         { label: 'Matched', value: fmt(s['Matched']), delta: `${s['Match Rate (%)']}%` },
@@ -222,7 +265,6 @@ function renderResults(data) {
     ];
     document.getElementById('metricsRow').innerHTML = metrics.map(m => metricCard(m.label, m.value, m.delta)).join('');
 
-    // Amount metrics
     const amounts = [
         { label: 'Matched Amount', value: fmtAmt(s['Matched Amount (Bank)']) },
         { label: 'Mismatch Amount', value: fmtAmt(s['Mismatch Amount (Bank)']) },
@@ -231,15 +273,12 @@ function renderResults(data) {
     ];
     document.getElementById('amountMetrics').innerHTML = amounts.map(m => metricCard(m.label, m.value)).join('');
 
-    // Brand summary
     document.getElementById('brandSummaryTable').innerHTML = data.brand_summary.length
         ? buildTable(data.brand_summary) : '<p class="text-gray-500">No brand data</p>';
 
-    // Status cross-match
     document.getElementById('statusCrossMatchTable').innerHTML = data.status_cross_match && data.status_cross_match.length
         ? buildTable(data.status_cross_match) : '<p class="text-gray-500">No status cross-match data</p>';
 
-    // LMS dupe warning
     const warn = document.getElementById('lmsDupeWarning');
     if (data.lms_duplicate_count > 0) {
         warn.textContent = `Found ${data.lms_duplicate_count.toLocaleString()} duplicate TxnIDs in LMS files.`;
@@ -248,7 +287,6 @@ function renderResults(data) {
         warn.classList.add('hidden');
     }
 
-    // Detail tabs
     const tabs = [
         { key: 'matched', label: 'Matched', count: data.matched.length },
         { key: 'amount_mismatch', label: 'Amount Mismatch', count: data.amount_mismatch.length },
@@ -281,18 +319,15 @@ async function downloadReport() {
     btn.disabled = true;
     btn.textContent = 'Generating...';
 
-    const payload = JSON.stringify({
-        bank_data: bankData,
-        lms_data: lmsData,
-        column_map: getColumnMap(),
-    });
+    const columnMap = getColumnMap();
+    const payload = {
+        bank_data: trimBankData(bankData, columnMap),
+        lms_data: trimLmsData(lmsData),
+        column_map: columnMap,
+    };
 
     try {
-        const res = await fetch('/api/report', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: payload,
-        });
+        const res = await sendCompressed('/api/report', payload);
         if (!res.ok) {
             const text = await res.text();
             throw new Error(text.slice(0, 300));

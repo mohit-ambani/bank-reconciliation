@@ -1,11 +1,12 @@
 """
 POST /api/report
-Accepts JSON body with bank_data, lms_data, column_map.
+Accepts JSON body (optionally gzip-compressed) with bank_data, lms_data, column_map.
 Returns an Excel file download.
 """
 import json
 import sys
 import os
+import gzip
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -17,11 +18,19 @@ from core.reconciler import reconcile
 from core.reporter import generate_excel_report
 
 
+def _read_body(handler):
+    """Read request body, decompressing gzip if needed."""
+    length = int(handler.headers.get("Content-Length", 0))
+    raw = handler.rfile.read(length)
+    if handler.headers.get("Content-Encoding") == "gzip":
+        raw = gzip.decompress(raw)
+    return json.loads(raw)
+
+
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
+            body = _read_body(self)
 
             column_map = body.get("column_map", {})
             bank_df = apply_bank_mapping(pd.DataFrame(body["bank_data"]), column_map)
